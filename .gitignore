@@ -1,0 +1,10 @@
+node_modules/
+.env
+*.log
+token.txt
+*.token
+_probe-*.mjs
+.test-home/
+dsh.log
+coverage/
+*.tgz

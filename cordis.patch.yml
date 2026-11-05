@@ -1,0 +1,16 @@
+# dsh-plugin-discord bundle patch.
+#
+# This layer only mounts the plugin row. Credentials and per-deployment options
+# live in the profile's own cordis.patch.yml (or the plugin manager UI), not in
+# the package: committing a Discord token here would leak it to every installer.
+#
+# The row id equals the module's exported `name` ("discord") so a profile patch
+# can address it by id; `name` is the package specifier resolved by the loader.
+#
+# Without a token the plugin still mounts (dormant): it logs that Discord is
+# disabled and leaves host startup untouched. Set runtime.workspace / provider /
+# model, optional debugHttpPort, and config.discord.token there.
+- insert:
+    - id: discord
+      name: dsh-plugin-discord
+      config: {}

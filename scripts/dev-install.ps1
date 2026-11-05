@@ -1,0 +1,215 @@
+﻿<#
+.SYNOPSIS
+  Prepare an ISOLATED DSH_HOME + profile for dsh-plugin-discord development.
+
+.DESCRIPTION
+  Creates a throwaway DSH home under the temp directory (or at -DshHome), copies
+  only .credentials.yaml / .anonymous-user-id from the real home, materializes
+  the "plugin-e2e" profile (dsh-base + dsh-web-app + dsh-plugin-discord linked
+  from this checkout) and runs the bundled pnpm installs.
+
+  It never edits the real DSH home's profiles or sessions and never boots the
+  real desktop profile. The printed commands only target the throwaway home.
+
+  Use scripts/e2e.ps1 for the full automated boot + /selftest run.
+
+.PARAMETER PluginDir
+  Plugin checkout to link into the profile (default: parent of this script).
+
+.PARAMETER DshHome
+  Throwaway DSH_HOME to (re)use. Default: a fresh %TEMP%\dsh-plugin-e2e-<rand>\home.
+
+.PARAMETER Workspace
+  Session workspace exposed to the bridge. Default: <parent-of-home>\workspace.
+
+.PARAMETER DebugHttpPort
+  Loopback-only self-test port for the plugin. Default 8799. 0 disables it.
+
+.PARAMETER Reuse
+  Keep an existing throwaway home instead of recreating profile files.
+
+.EXAMPLE
+  pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/dev-install.ps1 -DebugHttpPort 8799
+#>
+[CmdletBinding()]
+param(
+  [string]$PluginDir,
+  [string]$DshHome,
+  [string]$Workspace,
+  [int]$DebugHttpPort = 8799,
+  [switch]$Reuse,
+  [switch]$SkipPluginInstall,
+  [switch]$SkipProfileInstall
+)
+
+$ErrorActionPreference = 'Stop'
+
+function Write-Utf8NoBom {
+  param([string]$Path, [string]$Text)
+  [IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Assert-NotRealHome {
+  param([string]$Path, [string]$Real)
+  $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+  $realFull = [IO.Path]::GetFullPath($Real).TrimEnd('\')
+  if ($full -ieq $realFull) {
+    throw "refusing to use the real DSH home as the throwaway home: $full"
+  }
+}
+
+# ---- Locate the toolchain (no node/pnpm on PATH on this machine) ------------
+if (-not $PluginDir) { $PluginDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path }
+$PluginDir = (Resolve-Path $PluginDir).Path
+if (-not (Test-Path (Join-Path $PluginDir 'package.json'))) {
+  throw "plugin package.json not found in $PluginDir"
+}
+
+$realHome = if ($env:DSH_REAL_HOME) { $env:DSH_REAL_HOME } elseif ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+if (-not (Test-Path $realHome)) { throw "real DSH home not found: $realHome" }
+
+$nodePath = if ($env:DSH_NODE) { $env:DSH_NODE } else { Join-Path $realHome 'dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe' }
+$pnpmPath = if ($env:DSH_PNPM) { $env:DSH_PNPM } else { Join-Path $realHome 'dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.mjs' }
+if (-not (Test-Path $nodePath)) {
+  throw "bundled node not found: $nodePath. Set DSH_NODE to the node.exe path."
+}
+if (-not (Test-Path $pnpmPath)) {
+  throw "bundled pnpm not found: $pnpmPath. Set DSH_PNPM to the pnpm.mjs path."
+}
+
+# ---- Create the isolated home ----------------------------------------------
+if ($DshHome) {
+  $isolatedHome = [IO.Path]::GetFullPath($DshHome)
+} else {
+  $parent = Join-Path ([IO.Path]::GetTempPath()) ('dsh-plugin-e2e-' + ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+  $isolatedHome = Join-Path $parent 'home'
+}
+Assert-NotRealHome -Path $isolatedHome -Real $realHome
+if (-not $Workspace) {
+  $Workspace = Join-Path (Split-Path $isolatedHome -Parent) 'workspace'
+}
+$Workspace = [IO.Path]::GetFullPath($Workspace)
+$profileDir = Join-Path $isolatedHome 'profiles\plugin-e2e'
+
+New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
+New-Item -ItemType Directory -Force -Path $Workspace | Out-Null
+
+# Copy ONLY the credentials needed to reach the model; sessions stay isolated.
+$credentials = Join-Path $realHome '.credentials.yaml'
+if (-not (Test-Path $credentials)) {
+  throw "missing $credentials; the isolated profile needs model credentials to run the selftest"
+}
+Copy-Item -Force $credentials (Join-Path $isolatedHome '.credentials.yaml')
+$anonymousId = Join-Path $realHome '.anonymous-user-id'
+if (Test-Path $anonymousId) {
+  Copy-Item -Force $anonymousId (Join-Path $isolatedHome '.anonymous-user-id')
+}
+
+if (-not $Reuse -or -not (Test-Path (Join-Path $profileDir 'package.json'))) {
+  $linkSpec = 'link:' + $PluginDir.Replace('\', '/')
+  $manifest = [ordered]@{
+    name = 'dsh-profile-plugin-e2e'
+    private = $true
+    dependencies = [ordered]@{ 'dsh-plugin-discord' = $linkSpec }
+    dsh = [ordered]@{
+      profile = [ordered]@{
+        bundles = @('@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-plugin-discord')
+      }
+    }
+  }
+  Write-Utf8NoBom -Path (Join-Path $profileDir 'package.json') -Text ((ConvertTo-Json $manifest -Depth 10) + [Environment]::NewLine)
+  Write-Utf8NoBom -Path (Join-Path $profileDir 'cordis.yml') -Text "[]$([Environment]::NewLine)"
+  $workspacePosix = $Workspace.Replace('\', '/')
+  $patchLines = @(
+    '# Isolated dev overlay generated by scripts/dev-install.ps1.',
+    '# Only this throwaway home is affected; never copy this file into a real profile.',
+    '- id: discord',
+    '  name: dsh-plugin-discord',
+    '  config:',
+    '    runtime:',
+    ('      workspace: ' + $workspacePosix),
+    '      provider: deepseek-official',
+    '      model: deepseek-flash',
+    ('    debugHttpPort: ' + $DebugHttpPort),
+    ''
+  )
+  Write-Utf8NoBom -Path (Join-Path $profileDir 'cordis.patch.yml') -Text ($patchLines -join [Environment]::NewLine)
+  $workspaceYaml = @('packages:', '  - .', '', 'nodeLinker: hoisted', 'autoInstallPeers: false', '') -join [Environment]::NewLine
+  Write-Utf8NoBom -Path (Join-Path $profileDir 'pnpm-workspace.yaml') -Text $workspaceYaml
+}
+
+# ---- pnpm installs ---------------------------------------------------------
+$pluginModules = Join-Path $PluginDir 'node_modules\discord.js\package.json'
+$pluginLlm = Join-Path $PluginDir 'node_modules\@deepseek-ai\dsh-llm\package.json'
+if (-not $SkipPluginInstall -and ((-not (Test-Path $pluginModules)) -or (-not (Test-Path $pluginLlm)))) {
+  Write-Host '[dev-install] pnpm install in plugin dir ...'
+  Push-Location $PluginDir
+  try { & $nodePath $pnpmPath install --reporter=append-only } finally { Pop-Location }
+  if ($LASTEXITCODE -ne 0) { throw "pnpm install failed in $PluginDir" }
+}
+if (-not $SkipProfileInstall) {
+  Write-Host '[dev-install] pnpm install in isolated profile ...'
+  Push-Location $profileDir
+  try { & $nodePath $pnpmPath install --reporter=append-only } finally { Pop-Location }
+  if ($LASTEXITCODE -ne 0) { throw "pnpm install failed in $profileDir" }
+}
+
+# ---- Locate dsh.cmd for the printed boot command ---------------------------
+$dshCli = $env:DSH_CLI
+if (-not $dshCli) {
+  $candidates = @(
+    (Join-Path $env:ProgramFiles 'DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'),
+    'E:\deepseekharness\resources\runtime\cli\bin\dsh.cmd',
+    'C:\deepseekharness\resources\runtime\cli\bin\dsh.cmd'
+  )
+  foreach ($candidate in $candidates) {
+    if ($candidate -and (Test-Path $candidate)) { $dshCli = $candidate; break }
+  }
+  if (-not $dshCli) {
+    $command = Get-Command dsh -ErrorAction SilentlyContinue
+    if ($command) { $dshCli = $command.Source }
+  }
+}
+
+$envFile = Join-Path (Split-Path $isolatedHome -Parent) 'use-env.ps1'
+$envLines = @(
+  '# Dot-source this file to target the isolated DSH home (never the real one).',
+  ('$env:DSH_HOME = ' + "'" + $isolatedHome.Replace("'", "''") + "'"),
+  ('$env:DSH_REAL_HOME = ' + "'" + $realHome.Replace("'", "''") + "'"),
+  ('$env:DSH_NODE = ' + "'" + $nodePath.Replace("'", "''") + "'"),
+  ('$env:DSH_PNPM = ' + "'" + $pnpmPath.Replace("'", "''") + "'")
+)
+if ($dshCli) { $envLines += ('$env:DSH_CLI = ' + "'" + $dshCli.Replace("'", "''") + "'") }
+Write-Utf8NoBom -Path $envFile -Text (($envLines -join [Environment]::NewLine) + [Environment]::NewLine)
+
+$healthUrl = 'http://127.0.0.1:' + $DebugHttpPort + '/health'
+$selftestUrl = 'http://127.0.0.1:' + $DebugHttpPort + '/selftest'
+
+Write-Host ''
+Write-Host '=== dsh-plugin-discord isolated dev environment ===' -ForegroundColor Cyan
+Write-Host "临时 DSH_HOME : $isolatedHome"
+Write-Host "工作区        : $Workspace"
+Write-Host "profile       : $profileDir"
+Write-Host "隔离环境脚本   : $envFile"
+Write-Host "debug 端口    : $DebugHttpPort (仅回环，0 = 关闭)"
+Write-Host ''
+Write-Host '启动（只启动这个隔离 profile，不会碰真实 desktop profile）：' -ForegroundColor Yellow
+if ($dshCli) {
+  Write-Host "  . '$envFile'"
+  Write-Host "  & '$dshCli' --profile plugin-e2e --no-open --host 127.0.0.1 --port 8080"
+} else {
+  Write-Host '  未找到 dsh.cmd，请设置 DSH_CLI 后执行：'
+  Write-Host "  . '$envFile'"
+  Write-Host '  & "<install>\resources\runtime\cli\bin\dsh.cmd" --profile plugin-e2e --no-open --host 127.0.0.1 --port 8080'
+}
+Write-Host ''
+Write-Host '健康检查与自测（需要先启动上面的进程）：' -ForegroundColor Yellow
+Write-Host ('  GET  ' + $healthUrl)
+Write-Host ('  POST ' + $selftestUrl)
+Write-Host '  body: {"text":"Reply with exactly: E2E_PLUGIN_OK"}'
+Write-Host ('  PowerShell: Invoke-RestMethod -Method Post -Uri ' + $selftestUrl + ' -ContentType "application/json" -Body (ConvertTo-Json @{ text = "Reply with exactly: E2E_PLUGIN_OK" })')
+Write-Host ''
+Write-Host '清理（停止进程后删除整个临时目录）：' -ForegroundColor Yellow
+Write-Host ('  Remove-Item -Recurse -Force ' + "'" + (Split-Path $isolatedHome -Parent) + "'")
+Write-Host ''
+Write-Host '自动化 e2e：scripts/e2e.ps1（会 boot、等 /health、跑一次真实模型回合、再清理）' -ForegroundColor Gray

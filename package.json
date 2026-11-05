@@ -1,0 +1,61 @@
+{
+  "name": "dsh-plugin-discord",
+  "version": "0.1.2",
+  "description": "Native DeepSeek Harness (cordis) plugin: bridge Discord conversations to persistent DSH sessions",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "docs"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "discord",
+    "discord-bot",
+    "plugin"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml",
+      "listedByDefault": true
+    }
+  },
+  "engines": {
+    "dsh": ">=0.2.2-rc.1 <0.3.0",
+    "node": ">=22.18.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
+    "discord.js": "^14.28.1",
+    "undici": "^6.29.1",
+    "ws": "^8.18.3",
+    "https-proxy-agent": "^7.0.6"
+  },
+  "scripts": {
+    "test": "node --test --test-reporter=spec \"test/**/*.test.js\"",
+    "test:e2e": "node --test --test-reporter=spec \"test/e2e/plugin-e2e.mjs\"",
+    "dev-install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-install.ps1",
+    "e2e": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/e2e.ps1",
+    "e2e:precheck": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/e2e.ps1 -PrecheckOnly",
+    "e2e:health": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/e2e.ps1 -HealthOnly"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AckerM-github/dsh-plugin-discord.git"
+  },
+  "homepage": "https://github.com/AckerM-github/dsh-plugin-discord#readme",
+  "bugs": {
+    "url": "https://github.com/AckerM-github/dsh-plugin-discord/issues"
+  },
+  "author": "AckerM-github"
+}
